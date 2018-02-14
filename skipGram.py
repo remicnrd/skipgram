@@ -1,13 +1,9 @@
-from __future__ import division
-import argparse
-import pandas as pd
-
-# useful stuff
-import numpy as np
-from scipy.special import expit
-from sklearn.preprocessing import normalizene
-
+import sys
+import math
 import nltk
+import argparse
+import numpy as np
+import pandas as pdk
 
 
 __authors__ = ['rémi canard','maria bosch vidal']
@@ -25,6 +21,23 @@ def loadPairs(path):
     pairs = zip(data['word1'],data['word2'],data['similarity'])
     return pairs
 
+def get_all_words(sentences):
+    allWords = list()
+    for sentence in sentences:
+        for word in sentence:
+            word = word.lower()
+            if len(word) > 1 and word.isalnum():
+                allWords.append(word)
+    return allWords
+
+def sigmoid(z):
+    if z > 6:
+        return 1.0
+    elif z < -6:
+        return 0.0
+    else:
+        return 1 / (1 + math.exp(-z))
+
 
 class Word:
     def __init__(self, word):
@@ -34,76 +47,57 @@ class Word:
 
 class Vocabulary:
     def __init__(self, sentences, minCount):
-        self.words = []     # a list of word element, with the word and its frequency
-        self.word_map = {}  # a dictionnary of word and their hash value (place in the text)
+        self.wordList = list()  # a list of word element, with the word and its frequency
+        self.wordHash = dict()  # a dictionnary of word and their hash value (place in the text)
+        self.build(sentences, minCount)
 
-        self.build_words(sentences, minCount)
-        self.filter_for_rare_and_common()
-
-    def build_words(self, sentences, minCount):
-        words = []
-        word_map = {}
-
-        i = 0
+    def build(self, sentences, minCount):
+        wordList = list()
+        wordHash = dict()      
         for sentence in sentences:
             for word in sentence:
-                if word not in word_map:
-                    word_map[word] = len(words)
-                    words.append(Word(word))
-                words[word_map[word]].count += 1
-                i += 1
-                
-        self.words = words
-        self.word_map = word_map
-
-    def indices(self, tokens):
-        return [self.word_map[token] if token in self else self.word_map['{rare}'] for token in tokens]
-
-    def filter_for_rare_and_common(self):
-        # Remove rare words and sort
-        tmp = []
-        tmp.append(Word('{rare}'))
-        unk_hash = 0
-
-        count_unk = 0
-        for token in self.words:
-            if token.count < minCount:
-                count_unk += 1
-                tmp[unk_hash].count += token.count
+                if word not in wordList:
+                    wordHash[word] = len(wordList)  # The length of the list is used as our hash/counter as well
+                    wordList.append(Word(word))     # We append the Word element 
+                wordList[wordHash[word]].count += 1 # and keep track of frequency for mincount filtering later          
+        
+        # Create a new list without rare words
+        cleanList = list()
+        cleanList.append(Word('{unknownWord}'))
+        for word in wordList:
+            if word.count < minCount:
+                cleanList[0].count += word.count
             else:
-                tmp.append(token)
+                cleanList.append(word)
+        cleanList.sort(key=lambda word : word.count, reverse=True)
+        # Change our wordHash accordingly
+        wordHash = dict()
+        for i, w in enumerate(cleanList):
+            wordHash[w.word] = i
+            
+        self.wordList = cleanList
+        self.wordHash = wordHash
+    
+    def getHash(self, wordList):
+        return [self.wordHash[word] if word in self.wordList else self.wordHash['{unknownWord}'] for word in wordList]
 
-        tmp.sort(key=lambda token : token.count, reverse=True)
-
-        # Update word_map
-        word_map = {}
-        for i, token in enumerate(tmp):
-            word_map[token.word] = i
-
-        self.words = tmp
-        self.word_map = word_map
-        pass
 
 
-
-class TableForNegativeSamples:
-    def __init__(self, vocab):
-        power = 0.75
-        norm = sum([math.pow(t.count, power) for t in vocab.words]) # Normalizing constants
-
-        table_size = 1e8
-        table = np.zeros(table_size, dtype=np.uint32)
-
-        p = 0 # Cumulative probability
+class UnigramTable:
+    def __init__(self, vocabulary):
+        sumOfWeights = sum([math.pow(w.count, 3/4) for w in vocabulary.wordList])
+        tableSize = int(1e8)
+        table = np.zeros(tableSize, dtype=np.uint32)
+        p = 0
         i = 0
-        for j, word in enumerate(vocab):
-            p += float(math.pow(word.count, power))/norm
-            while i < table_size and float(i) / table_size < p:
+        for j, word in enumerate(vocabulary.wordList):
+            p += float(math.pow(word.count, 3/4))/sumOfWeights
+            while i < tableSize and float(i) / tableSize < p:
                 table[i] = j
                 i += 1
         self.table = table
 
-    def sample(self, count):
+    def negativeSample(self, count):
         indices = np.random.randint(low=0, high=len(self.table), size=count)
         return [self.table[i] for i in indices]
 
@@ -118,49 +112,37 @@ class mSkipGram:
         self.minCount = minCount
 
     def train(self,stepsize, epochs):
-
         # 1: we receive a text and create the dictionnary and the Negative sample table
-        vocab = Vocabulary(sentences, minCount)  # init vocab from train file
-        table = TableForNegativeSamples(vocab) # init table from train file
-
+        vocabulary = Vocabulary(sentences, self.minCount)  # init vocab from train file
+        unigramTable = UnigramTable(vocabulary)       # init table from train file
+        allWords = get_all_words(self.sentences)
 
         # 2: we create the NN and learn the weight matrix
-        for window in [5]:             # Max window length
-            for dim in [100]:          # Dimensionality of word embeddings
-                
-                # Initialize network
-                nn0 = np.random.uniform(low=-0.5/dim, high=0.5/dim, size=(len(vocab), dim))      # init first layer with random weights from a uniform distribution on the interval [-0.5, 0.5]/dim
-                nn1 = np.zeros(shape=(len(vocab), dim))                                          # init second layer with 0
-
-                alpha =  0.01                                                                    # Learning rate
-                tokens = vocab.word_map.values()
-
+        for window in [self.winSize]: 
+            for dim in [self.nEmbed]: 
+                layer0 = np.random.uniform(low=-0.5/dim, high=0.5/dim, size=(len(vocabulary.wordList), dim))
+                layer1 = np.zeros(shape=(len(vocabulary.wordList), dim))
+                tokens = vocabulary.getHash(allWords)
                 for token_idx, token in enumerate(tokens):
-                    current_window = np.random.randint(low=1, high=window+1)                     # Randomize window size, where win is the max window size
+                    current_window = np.random.randint(low=1, high=window+1)
                     context_start = max(token_idx - current_window, 0)
                     context_end = min(token_idx + current_window + 1, len(tokens))
-                    context = tokens[context_start:token_idx] + tokens[token_idx+1:context_end]  # Turn into an iterator?
-
+                    context = tokens[context_start:token_idx] + tokens[token_idx+1:context_end]
                     for context_word in context:
-                        neu1e = np.zeros(dim)                                                    # Init neu1e with zeros
-                        classifiers = [(token, 1)] + [(target, 0) for target in table.sample(k_negative_sampling)]
+                        ne = np.zeros(dim)
+                        classifiers = [(token, 1)] + [(target, 0) for target in unigramTable.negativeSample(self.negativeRate)]
                         for target, label in classifiers:
-                            z = np.dot(nn0[context_word], nn1[target])
+                            z = np.dot(layer0[context_word], layer1[target])
                             p = sigmoid(z)
-                            g = alpha * (label - p)
-                            neu1e += g * nn1[target]              # Error to backpropagate to nn0
-                            nn1[target] += g * nn0[context_word]  # Update nn1
-
-                        # Update nn0
-                        nn0[context_word] += neu1e
-
-                # Save model to file
-                save(vocab, nn0, 'output-%s-%d-%d-%d' % (input_filename, window, dim, word_phrase_passes))
-
-
+                            g = stepsize * (label - p)
+                            ne += g * layer1[target]
+                            layer1[target] += g * layer0[context_word] 
+                        layer0[context_word] += ne
 
     def save(self,path):
         # 3: we save the weight matrix to the specified path
+        with open(path, "wb") as f:
+            pickle.dump((vocabulary,layer0), f)
 
     def similarity(self,word1,word2):
         """
@@ -169,11 +151,18 @@ class mSkipGram:
         :param word2:
         :return: a float \in [0,1] indicating the similarity (the higher the more similar)
         """
-        raise NotImplementedError('implement it!')
+        vec1 = layer0[vocabulary.getHash([word1])[0]]
+        vec2 = layer0[vocabulary.getHash([word2])[0]]
+        dot_product = np.dot(vec1, vec2)
+        n1 = np.linalg.norm(vec1)
+        n2 = np.linalg.norm(vec2)
+        return dot_product / (n1 * n2)
 
     @staticmethod
     def load(path):
-        raise NotImplementedError('implement it!')
+        with open(path, "rb") as f:
+            a,b = pickle.load(f)  
+        return a,b
 
 if __name__ == '__main__':
 

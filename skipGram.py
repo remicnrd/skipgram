@@ -5,10 +5,6 @@ import argparse
 import numpy as np
 import pandas as pdk
 
-
-__authors__ = ['rémi canard','maria bosch vidal']
-__emails__  = ['B00713672@essec.edu','B00720030@essec.edu']
-
 def text2sentences(path):
     sentences = []
     with open(path) as f:

@@ -1,9 +1,10 @@
 import sys
 import math
 import nltk
+import pickle
 import argparse
 import numpy as np
-import pandas as pdk
+import pandas as pd
 
 
 __authors__ = ['rémi canard','maria bosch vidal']
@@ -48,27 +49,32 @@ class Word:
 class Vocabulary:
     def __init__(self, sentences, minCount):
         self.wordList = list()  # a list of word element, with the word and its frequency
+        self.simpleWordList = list() # simple list of element with only the words
         self.wordHash = dict()  # a dictionnary of word and their hash value (place in the text)
         self.build(sentences, minCount)
 
     def build(self, sentences, minCount):
         wordList = list()
+        simpleWordList = list()
         wordHash = dict()      
         for sentence in sentences:
             for word in sentence:
                 if word not in wordList:
                     wordHash[word] = len(wordList)  # The length of the list is used as our hash/counter as well
                     wordList.append(Word(word))     # We append the Word element 
+                    simpleWordList.append(word)     # We append the word
                 wordList[wordHash[word]].count += 1 # and keep track of frequency for mincount filtering later          
         
         # Create a new list without rare words
         cleanList = list()
+        simpleCleanList = list()
         cleanList.append(Word('{unknownWord}'))
         for word in wordList:
             if word.count < minCount:
                 cleanList[0].count += word.count
             else:
                 cleanList.append(word)
+                simpleCleanList.append(word.word)
         cleanList.sort(key=lambda word : word.count, reverse=True)
         # Change our wordHash accordingly
         wordHash = dict()
@@ -76,10 +82,11 @@ class Vocabulary:
             wordHash[w.word] = i
             
         self.wordList = cleanList
+        self.simpleWordList = simpleCleanList
         self.wordHash = wordHash
     
     def getHash(self, wordList):
-        return [self.wordHash[word] if word in self.wordList else self.wordHash['{unknownWord}'] for word in wordList]
+        return [self.wordHash[word] if word in self.simpleWordList else self.wordHash['{unknownWord}'] for word in wordList]
 
 
 
@@ -111,7 +118,7 @@ class mSkipGram:
         self.winSize = winSize
         self.minCount = minCount
 
-    def train(self,stepsize, epochs):
+    def train(self,stepsize):
         # 1: we receive a text and create the dictionnary and the Negative sample table
         vocabulary = Vocabulary(sentences, self.minCount)  # init vocab from train file
         unigramTable = UnigramTable(vocabulary)       # init table from train file
@@ -125,8 +132,8 @@ class mSkipGram:
                 tokens = vocabulary.getHash(allWords)
                 for token_idx, token in enumerate(tokens):
                     current_window = np.random.randint(low=1, high=window+1)
-                    context_start = max(token_idx - current_window, 0)
-                    context_end = min(token_idx + current_window + 1, len(tokens))
+                    context_start = np.maximum(token_idx - current_window, 0)
+                    context_end = np.minimum(token_idx + current_window + 1, len(tokens))
                     context = tokens[context_start:token_idx] + tokens[token_idx+1:context_end]
                     for context_word in context:
                         ne = np.zeros(dim)
@@ -138,11 +145,13 @@ class mSkipGram:
                             ne += g * layer1[target]
                             layer1[target] += g * layer0[context_word] 
                         layer0[context_word] += ne
+        self.vocabulary = vocabulary
+        self.weights = layer0
 
     def save(self,path):
         # 3: we save the weight matrix to the specified path
         with open(path, "wb") as f:
-            pickle.dump((vocabulary,layer0), f)
+            pickle.dump(self, f)
 
     def similarity(self,word1,word2):
         """
@@ -151,8 +160,8 @@ class mSkipGram:
         :param word2:
         :return: a float \in [0,1] indicating the similarity (the higher the more similar)
         """
-        vec1 = layer0[vocabulary.getHash([word1])[0]]
-        vec2 = layer0[vocabulary.getHash([word2])[0]]
+        vec1 = self.weights[self.vocabulary.getHash([word1])[0]]
+        vec2 = self.weights[self.vocabulary.getHash([word2])[0]]
         dot_product = np.dot(vec1, vec2)
         n1 = np.linalg.norm(vec1)
         n2 = np.linalg.norm(vec2)
@@ -161,8 +170,8 @@ class mSkipGram:
     @staticmethod
     def load(path):
         with open(path, "rb") as f:
-            a,b = pickle.load(f)  
-        return a,b
+            a = pickle.load(f)  
+        return a
 
 if __name__ == '__main__':
 
@@ -175,8 +184,8 @@ if __name__ == '__main__':
 
     if not opts.test:
         sentences = text2sentences(opts.text)
-        sg = mySkipGram(sentences)
-        sg.train()
+        sg = mSkipGram(sentences)
+        sg.train(stepsize = 0.1)
         sg.save(opts.model)
 
     else:
@@ -184,4 +193,4 @@ if __name__ == '__main__':
 
         sg = mSkipGram.load(opts.model)
         for a,b,_ in pairs:
-            print sg.similarity(a,b)
+            print(sg.similarity(a,b))
